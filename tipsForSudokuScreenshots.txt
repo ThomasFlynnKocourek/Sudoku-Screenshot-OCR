@@ -1,0 +1,8 @@
+-The sudoku board should take up more then 1/3rd of the screenshot
+-The sudoku board should not be cut off in any way
+-The sudoku board should have highly contrasting colors
+-The text should be easily distinguished from the back of the board
+-the sudoku board should be perfectly aligned vertically and horizontally
+-Pictures of physical sudoku boards
+(like in a sudoku puzzle book or a newspaper)
+will in all likelyhood not currently work.
