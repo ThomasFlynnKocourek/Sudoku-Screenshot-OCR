@@ -12,6 +12,9 @@ import sys
 import cv2
 import subprocess
 import re
+import platform
+
+import SudokuSolver
 
 class ImageProcesser:
 	#An OCR preprocesser for screenshots that contain sudoku puzzles.
@@ -21,12 +24,20 @@ class ImageProcesser:
 
 	version = '0.1'
 	path = os.path.dirname(os.path.realpath(__file__))
+	progressFolder = "/progress/"
+	tempFolder = "/temp/"
+	if (platform.system() == "Windows"):
+		progressFolder = "\\progress\\"
+		tempFolder = "\\temp\\"
+
+
+
 	threshold = 128 #should be between 0 and 255
 
-	gapOverlapCropPercent = 0.12 #the percentage (relative to the size of a gap overlap) to crop from each gap overlap
+	gapOverlapCropPercent = 0.13 #the percentage (relative to the size of a gap overlap) to crop from each side of the gap overlap
 	minimumLengthPercent = 0.3	#the size of the image is multiplied by this number to determine the minimum line length
 	lineDetectionScale = 0.1	#resizes image by this scale to make line detection quicker
-	commonPercent = 0.03		#gaps within commonPercent of the most common gaps are included in the most common gap size lists
+	commonPercent = 0.02		#gaps within commonPercent of the most common gaps are included in the most common gap size lists
 	lineSpacePercent = 0.0015		#percentage relative to the size of the image that determines the maximum size of a space when detecting lines
 	lineSpaceSumPercent = 0.004		#percentage relative to the size of the image that determines the maximum size of the sum of line spaces when detecting lines
 	minVertGapSize = 8
@@ -37,8 +48,12 @@ class ImageProcesser:
 		self.imageName = imageName
 		self.image = Image.open(self.path + self.imageName)
 		self.width, self.height = self.image.size
+		self.originalWidth = self.width
+		self.originalHeight = self.height
 		self.imageGray = self.image.convert('L')
 		self.sudokuBoard = ""
+		self.repairedBoard = ""
+		self.solvedBoard = ""
 
 		self.resizeImageTime = 0
 		self.binarizeTime = 0
@@ -53,6 +68,11 @@ class ImageProcesser:
 		self.saveGapOverlapImagesTime = 0
 		self.detectNumbersTime = 0
 		self.saveProgressImagesTime = 0
+
+		self.mostCommonVertGaps = []
+		self.mostCommonHorGaps = []
+		self.detectMostCommonGapsVertTime = 0
+		self.detectMostCommonGapsHorTime = 0
 
 	def process(self):
 		self.resizeImage()
@@ -70,26 +90,41 @@ class ImageProcesser:
 		self.detectGapsHor()
 		if (len(self.horGaps) < 3 and self.saveProgress == False):
 			return
+
 		self.detectMostCommonGapsVert()
+		while (len(self.mostCommonVertGaps) < len(self.vertGaps) and self.commonPercent <= 0.20 and len(self.mostCommonVertGaps) != 3 and len(self.mostCommonVertGaps) != 9):
+			self.commonPercent += 0.1
+			self.detectMostCommonGapsVert()
+		self.commonPercent = 0.02
 		if ((len(self.mostCommonVertGaps) != 3 and len(self.mostCommonVertGaps) != 9 or self.mostCommonVertGapSize <= 6) and self.saveProgress == False):
 			return
+
+
 		self.detectMostCommonGapsHor()
+		while (len(self.mostCommonHorGaps) < len(self.horGaps) and self.commonPercent <= 0.20 and len(self.mostCommonHorGaps) != 3 and len(self.mostCommonHorGaps) != 9):
+			self.commonPercent += 0.01
+			self.detectMostCommonGapsHor()
+		self.commonPercent = 0.02
 		if ((len(self.mostCommonHorGaps) != 3 and len(self.mostCommonHorGaps) != 9 or self.mostCommonHorGapSize <= 6) and self.saveProgress== False):
 			return
+
 		self.detectGapOverlap()
 		if (len(self.mostCommonVertGaps) == 3 and len(self.mostCommonHorGaps) == 3 and len(self.gapOverlaps) == 9):
-			self.convertOverlapGaps()
+			self.convertGapOverlaps()
+			self.sortGapOverlaps()
 		if (len(self.gapOverlaps) != 81 and self.saveProgress == False):
 			return
+
 		self.saveGapOverlapImages()
 		self.detectNumbers()
+
+		self.solve()
 
 	#resizes image
 	def resizeImage(self):
 		startTime = time.time()
 
 		minSize = 800
-		#resize image
 		if (self.width < minSize or self.height < minSize):
 
 			if (self.width <= self.height):
@@ -123,10 +158,25 @@ class ImageProcesser:
 
 		#convert the image to a black and white image using Otsu thresholding
 		###################################
-		
-		#find the threshold using OTSU thresholding.
 		self.grayArray = np.array(self.imageGray)
+
+		#apply unsharp mask
+		blurArray = cv2.GaussianBlur(self.grayArray, (9,9), 10.0)
+		self.grayArray = cv2.addWeighted(self.grayArray, 1.5, blurArray, -0.5, 0, self.grayArray)
+
+		#apply threshold using OTSU thresholding.
 		self.threshold, self.bwArray = cv2.threshold(self.grayArray,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)	
+
+		#apply threshold using adaptive thresholding
+		#self.bwArray = cv2.adaptiveThreshold(self.grayArray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 23, 2)
+
+		#Correct a threshold of 0 to a threshold of 1
+		if (int(self.threshold) == 0):
+			self.threshold = 1
+			self.bwArray = np.array(self.imageGray)	
+			self.bwArray[self.bwArray >= self.threshold] = 255
+			self.bwArray[self.bwArray < self.threshold] = 0
+
 		self.imageBW = Image.fromarray(self.bwArray)
 		self.pixels = self.imageBW.load()
 		###################################
@@ -362,8 +412,6 @@ class ImageProcesser:
 	def detectMostCommonGapsVert(self):
 		startTime = time.time()
 
-		self.mostCommonVertGaps = []
-
 		#Consolidate vertical gap sizes
 		for i in range(1,len(self.vertGapsBySize)):
 			if (len(self.vertGapsBySize[i]) > 0):
@@ -386,13 +434,11 @@ class ImageProcesser:
 		#sort mostCommonVertGaps by x position of gap
 		self.mostCommonVertGaps.sort(key=lambda a: a[0][0][0])
 		
-		self.detectMostCommonGapsVertTime = time.time() - startTime
+		self.detectMostCommonGapsVertTime += time.time() - startTime
 
 	#detect the most common sized gaps between horizontal lines
 	def detectMostCommonGapsHor(self):
 		startTime = time.time()
-
-		self.mostCommonHorGaps = []
 
 		############
 		#Consolidate horizontal gap sizes
@@ -417,7 +463,7 @@ class ImageProcesser:
 		#sort mostCommonHorGaps by x position of gap
 		self.mostCommonHorGaps.sort(key=lambda a: a[0][0][1])
 
-		self.detectMostCommonGapsHorTime = time.time() - startTime
+		self.detectMostCommonGapsHorTime += time.time() - startTime
 
 	#detect the spots where vertical and horizontal gaps overlap
 	def detectGapOverlap(self):
@@ -442,8 +488,8 @@ class ImageProcesser:
 					self.gapOverlaps.append((topLeftCorner,bottomRightCorner))
 		self.detectGapOverlapTime = time.time() - startTime
 
-	#convert overlap gaps
-	def convertOverlapGaps(self):
+	#convert gap overlaps
+	def convertGapOverlaps(self):
 		startTime = time.time()
 
 		newGapOverlaps = []
@@ -479,6 +525,11 @@ class ImageProcesser:
 
 		self.convertOverlapGapsTime = time.time() - startTime
 
+	#sort gap overlaps
+	def sortGapOverlaps(self):
+		#sort gapOverlaps by y position then x position of the upper left corner of the gap overlap
+		self.gapOverlaps.sort(key=lambda a: (a[0][1], a[0][0]))
+
 	#crop the image into 81 smaller images that are saved to file so that tesseract ocr can be used on them
 	def saveGapOverlapImages(self):
 		startTime = time.time()
@@ -491,7 +542,7 @@ class ImageProcesser:
 		#image = Image.fromarray(imageArray)
 
 		#blur image
-		#imageArray = cv2.GaussianBlur(imageArray, (5,5), 5.0)
+		imageArray = cv2.GaussianBlur(imageArray, (5,5), 2.0)
 	
 		#apply unsharp mask
 		#imageBlurArray = cv2.GaussianBlur(imageArray, (9,9), 10.0)
@@ -526,10 +577,19 @@ class ImageProcesser:
 			if(cropBottom > cropTop and cropRight > cropLeft):
 				cropImage = image.crop((cropLeft, cropTop, cropRight, cropBottom))
 				
-				cropImage = cropImage.resize((100,100), resample=Image.BILINEAR)
+				cropWidth, cropHeight = cropImage.size
+
+				scaleRatio = 1
+				if (cropWidth < cropHeight):
+					scaleRatio = 300 / cropWidth
+				else:
+					scaleRatio = 300 / cropHeight
+				#print("Scale Ratio: ", scaleRatio)
+
+				#cropImage = cropImage.resize((300, 300), resample=Image.BILINEAR)
+				cropImage = cropImage.resize((int(cropWidth*scaleRatio), int(cropHeight*scaleRatio)), resample=Image.BICUBIC)
 				cropImageArray = np.array(cropImage)
 	
-
 				#apply unsharp mask
 				cropImageBlurArray = cv2.GaussianBlur(cropImageArray, (9,9), 10.0)
 				cropImageArray = cv2.addWeighted(cropImageArray, 1.5, cropImageBlurArray, -0.5, 0, cropImageArray)
@@ -542,7 +602,7 @@ class ImageProcesser:
 			else:	#if the cropped image is not a proper size it creates a 1x1 black image to save
 				cropImage = Image.new("1",(1,1))
 
-			cropImage.save(self.path + '\\temp\\' + str(count) + '.tif', format="tiff", dpi=(300,300))
+			cropImage.save(self.path + self.tempFolder + str(count) + '.tif', format="tiff", dpi=(300,300))
 
 		self.saveGapOverlapImagesTime = time.time() - startTime
 
@@ -552,17 +612,19 @@ class ImageProcesser:
 
 		##############################
 		#save grayscale image
-		self.imageGray.save(self.path + '\\progress\\' + "1-GrayScale" + '.png', format="png")
+		self.imageGray.save(self.path + self.progressFolder + "1-GrayScale" + '.png', format="png")
 		##############################
 		#save binarized image
-		self.imageBW.save(self.path + '\\progress\\' + "2-binarized" + '.png', format="png")
+		self.imageBW.save(self.path + self.progressFolder + "2-binarized" + '.png', format="png")
 		##############################
 		#Save vertically shrunk image
-		self.imageBWShort.save(self.path + '\\progress\\' + "3-verticallyShrunk" + '.png', format="png")
+		self.imageBWShort.save(self.path + self.progressFolder + "3-verticallyShrunk" + '.png', format="png")
 		##############################
 		#Save horizontally shrunk image
-		self.imageBWThin.save(self.path + '\\progress\\' + "4-horizontallyShrunk" + '.png', format="png")
+		self.imageBWThin.save(self.path + self.progressFolder + "4-horizontallyShrunk" + '.png', format="png")
 		##############################
+		#convert gray image to rgb
+		imGrayRGB = self.imageGray.convert('RGB')
 		#convert black and white image to rgb
 		imBWRGB = self.imageBW.convert('RGB')
 		##############################
@@ -573,7 +635,7 @@ class ImageProcesser:
 			draw.line(i,fill=(255, 0, 0))
 		for i in self.linesHor:
 			draw.line(i,fill=(255, 0, 0))
-		imLines.save(self.path + '\\progress\\' + "5-detectedLines" + '.png', format="png")
+		imLines.save(self.path + self.progressFolder + "5-detectedLines" + '.png', format="png")
 		##############################
 		#draw detected vertical gaps in image
 		imVertGaps = copy.copy(imBWRGB)
@@ -596,7 +658,7 @@ class ImageProcesser:
 			highY = (y2 if y2 > y4 else y4)
 			draw.rectangle(((x1,lowY),(x4,highY)), fill=colorFill)
 			counter = counter + 1
-		imVertGaps.save(self.path + '\\progress\\' + "6-vertGaps" + '.png', format="png")
+		imVertGaps.save(self.path + self.progressFolder + "6-vertGaps" + '.png', format="png")
 		##############################
 		#draw detected horizontal gaps in image
 		imHorGaps = copy.copy(imBWRGB)
@@ -620,7 +682,7 @@ class ImageProcesser:
 			#draw.line(i[0], fill=(246, 0, 255))
 			#draw.line(i[1], fill=(255, 127, 0))
 			counter = counter + 1
-		imHorGaps.save(self.path + '\\progress\\' + "7-horGaps" + '.png', format="png")
+		imHorGaps.save(self.path + self.progressFolder + "7-horGaps" + '.png', format="png")
 		##############################	
 		#draw detected most commonly sized vertical gaps in image
 		imCommonVertGaps = copy.copy(imBWRGB)
@@ -644,10 +706,10 @@ class ImageProcesser:
 			draw.rectangle(((x1,lowY),(x4,highY)), fill=colorFill)
 			counter = counter + 1
 		#print(counter)
-		imCommonVertGaps.save(self.path + '\\progress\\' + "8-mostCommonVertGaps" + '.png', format="png")
+		imCommonVertGaps.save(self.path + self.progressFolder + "8-mostCommonVertGaps" + '.png', format="png")
 		##############################
 		#draw detected most commonly sized horizontal gaps in image
-		imCommonHorGaps = copy.copy(imBWRGB)
+		imCommonHorGaps = copy.copy(imGrayRGB)
 		draw = ImageDraw.Draw(imCommonHorGaps)
 		counter = 0
 		#print("Length of mostCommonHorGaps: ", len(mostCommonHorGaps))
@@ -670,7 +732,7 @@ class ImageProcesser:
 			#draw.line(i[1], fill=(255, 127, 0))
 			counter = counter + 1
 		#print(counter)
-		imCommonHorGaps.save(self.path + '\\progress\\' + "9-mostCommonHorGaps" + '.png', format="png")
+		imCommonHorGaps.save(self.path + self.progressFolder + "9-mostCommonHorGaps" + '.png', format="png")
 		##############################	
 		#draw detected overlap rectangles in image
 		imOverlapGaps = copy.copy(imBWRGB)
@@ -681,9 +743,9 @@ class ImageProcesser:
 			colorFill = ((246,0,255) if counter % 2 == 0 else (255,127,0))
 			draw.rectangle(i,fill=colorFill)
 			counter = counter + 1
-		imOverlapGaps.save(self.path + '\\progress\\' + "10-overlapGaps" + '.png', format="png")
+		imOverlapGaps.save(self.path + self.progressFolder + "10-overlapGaps" + '.png', format="png")
 		##############################
-		#draw detected numbers in image
+		#draw detected board in image
 		imDetectedNums = copy.copy(imBWRGB)
 		draw = ImageDraw.Draw(imDetectedNums)
 		vertGridSize = self.mostCommonVertGapSize
@@ -706,52 +768,110 @@ class ImageProcesser:
 					y = self.gapOverlaps[i][0][1] + vertGridSize / 2 - fontHeight / 2 - fontHeight*0.12	#last term accounts for space at top of font
 					xy = (x, y)
 					draw.text(xy, numChar, fill=color, font=font)
-		imDetectedNums.save(self.path + "\\progress\\" + "11-detectedNums" + ".png", format="png")
+		imDetectedNums.save(self.path + self.progressFolder + "11-detectedNums" + ".png", format="png")
 
-
+		######################################
+		#draw repaired board in image
+		imRepairedNums = copy.copy(imBWRGB)
+		draw = ImageDraw.Draw(imRepairedNums)
+		vertGridSize = self.mostCommonVertGapSize
+		horGridSize = self.mostCommonHorGapSize
+		gridSquareSize = ((vertGridSize) if vertGridSize < horGridSize else (horGridSize))
+		fontSize = math.floor(gridSquareSize * .7 * (1 - self.gapOverlapCropPercent))
+		backColor = (224,224,224)
+		color = (204,53,110)
+		for i in range(len(self.sudokuBoard)):
+			if(self.sudokuBoard[i] != "0"):
+				if (i < len(self.gapOverlaps)):
+					draw.rectangle(self.gapOverlaps[i],fill=backColor)
+		for i in range(len(self.repairedBoard)):
+			if(self.repairedBoard[i] != "0"):
+				if (i < len(self.gapOverlaps)):
+					numChar = self.repairedBoard[i]
+					font = ImageFont.truetype("arial.ttf",fontSize) 
+					fontWidth, fontHeight = font.getsize(numChar)
+					x = self.gapOverlaps[i][0][0] + horGridSize / 2 - fontWidth / 2
+					y = self.gapOverlaps[i][0][1] + vertGridSize / 2 - fontHeight / 2 - fontHeight*0.12	#last term accounts for space at top of font
+					xy = (x, y)
+					draw.text(xy, numChar, fill=color, font=font)
+		imRepairedNums.save(self.path + self.progressFolder + "12-repairedNums" + ".png", format="png")
+		######################################
+		#draw solved board in image
+		imSolvedNums = copy.copy(self.imageGray.convert('RGB'))
+		draw = ImageDraw.Draw(imSolvedNums)
+		vertGridSize = self.mostCommonVertGapSize
+		horGridSize = self.mostCommonHorGapSize
+		gridSquareSize = ((vertGridSize) if vertGridSize < horGridSize else (horGridSize))
+		fontSize = math.floor(gridSquareSize * .7 * (1 - self.gapOverlapCropPercent))
+		backColor = (224,224,224)
+		color = (35,80,153)
+		for i in range(len(self.solvedBoard)):
+			if(self.repairedBoard != "" and self.repairedBoard[i] == "0" or self.sudokuBoard[i] == "0"):
+				if (i < len(self.gapOverlaps)):
+					draw.rectangle(self.gapOverlaps[i],fill=backColor)
+		for i in range(len(self.solvedBoard)):
+			if(self.repairedBoard != "" and self.repairedBoard[i] == "0" or self.sudokuBoard[i] == "0"):
+				if (i < len(self.gapOverlaps)):
+					numChar = self.solvedBoard[i]
+					font = ImageFont.truetype("arial.ttf",fontSize) 
+					fontWidth, fontHeight = font.getsize(numChar)
+					x = self.gapOverlaps[i][0][0] + horGridSize / 2 - fontWidth / 2
+					y = self.gapOverlaps[i][0][1] + vertGridSize / 2 - fontHeight / 2 - fontHeight*0.12	#last term accounts for space at top of font
+					xy = (x, y)
+					draw.text(xy, numChar, fill=color, font=font)
+		imSolvedNums.save(self.path + self.progressFolder + "13-solvedNums" + ".png", format="png")
+		######################################
 		self.saveProgressImagesTime = time.time() - startTime
-
+		######################################
 	#use tesseract ocr on saved images and get results
 	def detectNumbers(self):
 		startTime = time.time()
 		
 		#make text file with all image file names
-		imageListFile = open(self.path + "\\temp\\imagelist.txt","w")
+		imageListFile = open(self.path + self.tempFolder + "imagelist.txt","w")
 		for i in range(1, len(self.gapOverlaps) + 1):
-			imageListFile.write(self.path + "\\temp\\" + str(i) + ".tif\n")
+			imageListFile.write(self.path + self.tempFolder + str(i) + ".tif\n")
+			#imageListFile.write(self.path + self.tempFolder + str(i) + ".tif\n")
+			#imageListFile.write(self.path + self.tempFolder + str(i) + ".tif\n")
+			#imageListFile.write(self.path + self.tempFolder + str(i) + ".tif\n")
+			#imageListFile.write(self.path + self.tempFolder + str(i) + ".tif\n")
+
 		imageListFile.close()
 
 		#run tesseract ocr on image list
-		imgListPath = "\"" + self.path +  "\\temp\\imagelist.txt" + "\" "
-		txtPath = "\"" + self.path +  "\\temp\\out" + "\" "
-		processStr = "tesseract " + imgListPath + " " + txtPath + " --oem 0 --psm 10 -l eng -c tessedit_char_whitelist=123456789 "# -c tessedit_write_images=true"  -c page_separator=# 
+		imgListPath = "\"" + self.path +  self.tempFolder + "imagelist.txt" + "\" "
+		txtPath = "\"" + self.path +  self.tempFolder + "out" + "\" "
+		processStr = "tesseract " + imgListPath + " " + txtPath + " --oem 0 --psm 13 -l eng -c tessedit_char_whitelist=123456789 -c page_separator=# -c load_system_dawg=false -c load_freq_dawg=false -c debug_file=nul"# -c tessedit_write_images=true"  -c page_separator=# 
 		subprocess.call(processStr, shell=False)
 
 		#get tesseract ocr output
-		recCharFile = open(self.path + "\\temp\\out.txt", "r")
+		recCharFile = open(self.path + self.tempFolder + "out.txt", "r")
 		recChars = recCharFile.read()
 
-		print (recChars)
+		#print(recChars)
 
+		#replace space with empty string
+		recChars = re.sub(" ","", recChars)
+		#replace multiple numbers with a zero
+		recChars = re.sub("[123456789]{2,}","0", recChars)
 		#replace line feed with empty string
 		recChars = re.sub(chr(10), "", recChars)
-		#replace number followed by form feed with matched number
-		recChars = re.sub("([123456789])" + chr(12), r"\1", recChars)
-		#replace form feed with 0
-		recChars = re.sub(chr(12), "0", recChars)
+		#replace number followed by # with matched number
+		recChars = re.sub("([0123456789])" + "#", r"\1", recChars)
+		#replace # with 0
+		recChars = re.sub("#", "0", recChars)
 
 		self.sudokuBoard = recChars
-
 		
 		"""
 		for i in range(1, len(self.gapOverlaps) + 1):
-			imgPath = "\"" + self.path +  "\\temp\\" + str(i) + ".tif"  + "\" "
-			txtPath = "\"" + self.path +  "\\temp\\" + str(i) + "\" "
+			imgPath = "\"" + self.path +  self.tempFolder + str(i) + ".tif"  + "\" "
+			txtPath = "\"" + self.path +  self.tempFolder + str(i) + "\" "
 			processStr = "tesseract " + imgPath + " " + txtPath + " --oem 0 --psm 10 -l eng -c tessedit_char_whitelist=123456789 -c load_system_dawg=false -c load_freq_dawg=false  -c debug_file=nul"# -c tessedit_write_images=true"
 			subprocess.call(processStr,shell=False)
 
 		for i in range(1, len(self.gapOverlaps) + 1):
-			recCharFile = open(self.path + "\\temp\\" + str(i) + ".txt")
+			recCharFile = open(self.path + self.tempFolder + str(i) + ".txt")
 			recChars = recCharFile.read()
 			recCharFile.close()
 			numFound = False
@@ -767,9 +887,33 @@ class ImageProcesser:
 		"""
 		self.detectNumbersTime = time.time() - startTime
 
+	def solve(self):
+		if (len(self.sudokuBoard) == 81):
+			solver = SudokuSolver.SudokuSolver(self.sudokuBoard)
+			
+			if (solver.detectProblems()):
+				#Attempt to repair grid
+				print("Problem detected with input grid. Not Solvable. Attempting to repair grid.")
+				solver.removeProblems()
+				self.repairedBoard = solver.getGridString()
+				self.sudokuBoard = self.repairedBoard
+			else:
+				self.repairedBoard = self.sudokuBoard
+
+			solver.solve()
+
+			self.solvedBoard = solver.getGridString()
+
+			#print("Detected Board: ", self.sudokuBoard)
+			#print("Repaired Board: ", self.repairedBoard)
+			#print("  Solved Board: ", self.solvedBoard)
+
+
 ##########COMMAND LINE
 
 if (len(sys.argv) > 1): 
+	startTime = time.time()
+
 	s = False
 	ip = ImageProcesser(sys.argv[1])
 	#handle command line modifiers
@@ -804,4 +948,5 @@ if (len(sys.argv) > 1):
 	print("\tsaveGapOverlapImages time:" , ip.saveGapOverlapImagesTime, "seconds")
 	print("\tdetectNumbers time:" , ip.detectNumbersTime, "seconds")
 	print("\tsaveProgressImages time:" , ip.saveProgressImagesTime, "seconds")
+	print("\nTotal Time: ", time.time() - startTime)
 

@@ -7,11 +7,16 @@ import time
 import copy
 import numpy as np
 import sys
-
+import platform
 
 class ImagePreprocesser:
 	version = '0.1'
 	path = os.path.dirname(os.path.realpath(__file__))
+
+	thresholdTestFolder = "/thresholdtest/"
+	if (platform.system() == "Windows"):
+		thresholdTestFolder = "\\thresholdtest\\"
+
 	threshold = 10 #should be between 0 and 255
 	gapOverlapCropPercent = 0.05 #the percentage (relative to the size of a gap overlap) to crop from each gap overlap
 	minimumLengthPercent = 0.3
@@ -34,19 +39,19 @@ class ImagePreprocesser:
 			if (grayColorCounts[i][0] > highCount):
 				highCount = grayColorCounts[i][0]
 		print("High color count: ", highCount)
-		for i in range(0,100):
-			for j in range(0,len(grayColorCounts),1):
-				if (grayColorCounts[j][0] >= (highCount * 0.01 * (100 - i) - (highCount * 0.005))):
-					print("X",end="")
-				else:
-					print("-",end="")
-			print()
+		#for i in range(0,100):
+		#	for j in range(0,len(grayColorCounts),1):
+		#		if (grayColorCounts[j][0] >= (highCount * 0.01 * (100 - i) - (highCount * 0.005))):
+		#			print("X",end="")
+		#		else:
+		#			print("-",end="")
+		#	print()
 
-		for i in range(len(grayColorCounts)):
-			if (i % 10 == 0):
-				print("|",end="")
-			else:
-				print(" ",end="")
+		#for i in range(len(grayColorCounts)):
+		#	if (i % 10 == 0):
+		#		print("|",end="")
+		#	else:
+		#		print(" ",end="")
 
 
 		#for i in range(0, len(grayColorCounts), 2):
@@ -94,13 +99,16 @@ class ImagePreprocesser:
 		thresholdArray[thresholdArray < thresholdValue] = 0
 		
 		thresholdImage = Image.fromarray(thresholdArray)
-		thresholdImage.save(self.path + '\\thresholdtest\\' + str(thresholdValue) + '.png', format="png")
+		thresholdImage.save(self.path + self.thresholdTestFolder + str(thresholdValue) + '.png', format="png")
 
 if (len(sys.argv) > 1): 
 	ip = ImagePreprocesser(sys.argv[1])
 	ip.outputGrayColorCounts()
 	ip.process()
 
+	ip.customThreshold(0)
+	ip.customThreshold(1)
+	ip.customThreshold(5)
 	ip.customThreshold(10)
 	ip.customThreshold(20)
 	ip.customThreshold(30)
@@ -127,6 +135,8 @@ if (len(sys.argv) > 1):
 	ip.customThreshold(230)
 	ip.customThreshold(240)
 	ip.customThreshold(250)
-	
+	ip.customThreshold(254)
+	ip.customThreshold(255)
+	ip.customThreshold(300)
 
 
